@@ -1,0 +1,105 @@
+// web-app/prisma/schema.prisma
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+model Meeting {
+    id          String        @id @default(cuid())
+    guildId     String
+    channelId   String
+    channelName String
+    startedAt   DateTime
+    endedAt     DateTime?
+    status      MeetingStatus @default(RECORDING)
+    duration    Int?
+
+    participants   Participant[]
+    recordings     Recording[]
+    transcriptions Transcription[]
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@map("meetings")
+}
+
+model Participant {
+    id        String  @id @default(cuid())
+    userId    String
+    username  String
+    meetingId String
+    meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+    joinedAt DateTime
+    leftAt   DateTime?
+
+    createdAt DateTime @default(now())
+
+    @@map("participants")
+}
+
+model Recording {
+    id        String  @id @default(cuid())
+    meetingId String
+    meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+    filename      String
+    filepath      String
+    filesize      Int
+    duration      Int?
+    format        String        @default("ogg")
+    recordingType RecordingType @default(PARTICIPANT)
+    participantId String?
+    storageType   StorageType   @default(LOCAL)
+    storagePath   String
+
+    createdAt DateTime @default(now())
+
+    @@map("recordings")
+}
+
+model Transcription {
+    id        String  @id @default(cuid())
+    meetingId String
+    meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+    content      String?
+    summary      String?
+    n8nTaskId    String?
+    status       TranscriptionStatus @default(PENDING)
+    errorMessage String?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@map("transcriptions")
+}
+
+enum MeetingStatus {
+    RECORDING
+    PROCESSING
+    COMPLETED
+    ERROR
+}
+
+enum TranscriptionStatus {
+    PENDING
+    IN_PROGRESS
+    COMPLETED
+    ERROR
+}
+
+enum RecordingType {
+    PARTICIPANT
+    COMPLETE
+}
+
+enum StorageType {
+    LOCAL
+    S3
+}
