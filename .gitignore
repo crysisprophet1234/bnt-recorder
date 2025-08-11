@@ -137,3 +137,13 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# IA
+.qodo
+.roo
+.cline
+
+services
+
+output
+recordings
