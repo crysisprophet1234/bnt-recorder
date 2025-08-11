@@ -1,7 +1,6 @@
-// discord-bot/src/utils/AudioProcessor.ts
 import { spawn } from 'child_process';
 import { join, basename } from 'path';
-import { readdir, unlink, mkdir, copyFile } from 'fs/promises';
+import { readdir, unlink, mkdir, copyFile, stat, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import logger from '../utils/logger'
 
@@ -9,6 +8,18 @@ interface ParticipantData {
     userId: string;
     username: string;
 }
+
+interface PcmSegment {
+    userId: string;
+    username: string;
+    path: string;
+    mtimeMs: number;
+    durationSec: number;
+}
+
+// PCM: s16le (16-bit) * 2 canais * 48000 amostras/seg = 192000 bytes/seg
+const BYTES_PER_SECOND = 48000 * 2 * 2;
+const SILENCE_REMOVE_FILTER = 'silenceremove=stop_periods=-1:stop_duration=3:stop_threshold=-50dB';
 
 export class AudioProcessor {
     private readonly ffmpegPath: string;
@@ -31,7 +42,7 @@ export class AudioProcessor {
         const processedFiles: string[] = [];
 
         try {
-            // Process audio for each participant
+            // 1) Por usuário: gerar OGG já SEM silêncio
             for (const participant of participants) {
                 const participantFiles = await this.getParticipantFiles(recordingsDir, participant.userId);
 
@@ -48,13 +59,16 @@ export class AudioProcessor {
                 }
             }
 
-            // Create complete meeting audio
-            const fullMeetingFile = await this.createFullMeetingAudio(processedFiles, outputDir, sanitizedMeetingId);
+            // 2) Construir segments.json (timeline sequencial)
+            const segments = await this.buildSegmentsJson(recordingsDir, participants, outputDir);
+
+            // 3) Criar o "complete" sequencial (sem sobreposição e sem silêncio)
+            const fullMeetingFile = await this.createFullMeetingAudioSequential(segments, outputDir, sanitizedMeetingId);
             if (fullMeetingFile) {
                 processedFiles.push(fullMeetingFile);
             }
 
-            // Clean up temporary files
+            // 4) Clean up temporary files
             await this.cleanupTempFiles(recordingsDir);
 
             return processedFiles;
@@ -106,28 +120,30 @@ export class AudioProcessor {
 
         try {
             if (files.length === 1) {
-                // Single file conversion
+                // Single file conversion + remove silêncio
                 await this.runFFmpeg([
                     '-f', 's16le',
                     '-ar', '48000',
                     '-ac', '2',
                     '-i', files[0],
+                    '-af', SILENCE_REMOVE_FILTER,
                     '-c:a', 'libopus',
                     '-y', // Overwrite output file
                     outputFile
                 ]);
             } else {
-                // Multiple files concatenation
-                const args = [];
+                // Múltiplos arquivos: concat + remove silêncio
+                const args: string[] = [];
                 
                 // Add input files
                 for (const file of files) {
                     args.push('-f', 's16le', '-ar', '48000', '-ac', '2', '-i', file);
                 }
                 
-                // Add filter complex for concatenation
-                const filterComplex = files.map((_, index) => `[${index}:0]`).join('') + 
-                                    `concat=n=${files.length}:v=0:a=1[out]`;
+                // Concatena e aplica silenceremove
+                const filterComplex =
+                    files.map((_, index) => `[${index}:0]`).join('') + 
+                    `concat=n=${files.length}:v=0:a=1,${SILENCE_REMOVE_FILTER}[out]`;
                 
                 args.push('-filter_complex', filterComplex);
                 args.push('-map', '[out]');
@@ -147,43 +163,110 @@ export class AudioProcessor {
         }
     }
 
-    private async createFullMeetingAudio(participantFiles: string[], outputDir: string, meetingId: string): Promise<string | null> {
-        if (participantFiles.length === 0) return null;
+    private async buildSegmentsJson(recordingsDir: string, participants: ParticipantData[], outDir: string): Promise<PcmSegment[]> {
+        const all: PcmSegment[] = [];
+        for (const p of participants) {
+            const files = await this.getParticipantFiles(recordingsDir, p.userId);
+            for (const f of files) {
+                try {
+                    const s = await stat(f);
+                    const durationSec = await this.fileDurationSec(f);
+                    all.push({
+                        userId: this.sanitizeFilename(p.userId),
+                        username: this.sanitizeFilename(p.username),
+                        path: f,
+                        mtimeMs: s.mtimeMs,
+                        durationSec
+                    });
+                } catch (e) {
+                    logger.warn(`Falha ao coletar stats de ${f}:`, e);
+                }
+            }
+        }
 
-        const sanitizedMeetingId = this.sanitizeFilename(meetingId);
-        const outputFile = join(outputDir, `${sanitizedMeetingId}-complete.ogg`);
+        // Ordena por "quando foi gravado" (mtime). Se tiver timestamp no nome, adapte aqui.
+        all.sort((a, b) => a.mtimeMs - b.mtimeMs);
+
+        // Constroi timeline sequencial (sem sobreposição)
+        let cursor = 0;
+        const timeline = all.map(seg => {
+            const start = cursor;
+            const end = start + seg.durationSec;
+            cursor = end;
+            return {
+                userId: seg.userId,
+                username: seg.username,
+                source: seg.path,
+                start,
+                end,
+                duration: seg.durationSec
+            };
+        });
 
         try {
-            if (participantFiles.length === 1) {
-                // Single participant, copy file
-                await copyFile(participantFiles[0], outputFile);
-            } else {
-                // Multiple participants, mix audio
-                const args = [];
-                
-                // Add input files
-                for (const file of participantFiles) {
-                    args.push('-i', file);
-                }
-                
-                // Add filter complex for mixing
-                const filterComplex = participantFiles.map((_, index) => `[${index}:0]`).join('') + 
-                                    `amix=inputs=${participantFiles.length}:duration=longest[out]`;
-                
-                args.push('-filter_complex', filterComplex);
-                args.push('-map', '[out]');
-                args.push('-c:a', 'libopus');
-                args.push('-y');
-                args.push(outputFile);
+            await writeFile(
+                join(outDir, 'segments.json'),
+                JSON.stringify({
+                    sampleRate: 48000,
+                    channels: 2,
+                    format: 's16le',
+                    silenceRemoved: { threshold: '-50dB', minDurationSec: 3 },
+                    segments: timeline
+                }, null, 2),
+                'utf8'
+            );
+            logger.info(`segments.json criado em ${join(outDir, 'segments.json')}`);
+        } catch (e) {
+            logger.error('Erro ao escrever segments.json:', e);
+        }
 
-                await this.runFFmpeg(args);
+        return all;
+    }
+
+    private async createFullMeetingAudioSequential(segments: PcmSegment[], outputDir: string, meetingId: string): Promise<string | null> {
+        if (segments.length === 0) return null;
+
+        const sanitizedMeetingId = this.sanitizeFilename(meetingId);
+        const tmpDir = join(outputDir, '_tmp');
+        await this.ensureDirectoryExists(tmpDir);
+
+        try {
+            // 1) Converte cada segmento PCM -> OGG aplicando remoção de silêncio
+            const chunkPaths: string[] = [];
+            for (let i = 0; i < segments.length; i++) {
+                const seg = segments[i];
+                const chunk = join(tmpDir, `${i.toString().padStart(6, '0')}-${seg.userId}.ogg`);
+                await this.runFFmpeg([
+                    '-f','s16le','-ar','48000','-ac','2','-i', seg.path,
+                    '-af', SILENCE_REMOVE_FILTER,
+                    '-c:a','libopus','-y', chunk
+                ]);
+                chunkPaths.push(chunk);
             }
 
-            logger.info(`Áudio completo da reunião criado: ${outputFile}`);
+            // 2) Concatena os chunks já em OGG/Opus (concat demuxer)
+            const concatListPath = join(tmpDir, 'list.txt');
+            const listFile = chunkPaths.map(p => `file '${p.replace(/'/g,"'\\''")}'`).join('\n');
+            await writeFile(concatListPath, listFile, 'utf8');
+
+            const outputFile = join(outputDir, `${sanitizedMeetingId}-complete.ogg`);
+            await this.runFFmpeg([
+                '-f','concat','-safe','0','-i', concatListPath,
+                '-c:a','copy', // sem reencode extra
+                '-y', outputFile
+            ]);
+
+            // Limpa temporários
+            try {
+                for (const p of chunkPaths) await unlink(p);
+                await unlink(concatListPath);
+            } catch {}
+
+            logger.info(`Áudio completo da reunião (sequencial) criado: ${outputFile}`);
             return outputFile;
 
         } catch (error) {
-            logger.error('Erro ao criar áudio completo da reunião:', error);
+            logger.error('Erro ao criar áudio completo da reunião (sequencial):', error);
             return null;
         }
     }
@@ -232,6 +315,11 @@ export class AudioProcessor {
             .substring(0, 255); // Limit length
     }
 
+    private async fileDurationSec(filePath: string): Promise<number> {
+        const s = await stat(filePath);
+        return s.size / BYTES_PER_SECOND;
+    }
+
     private async runFFmpeg(args: string[]): Promise<void> {
         return new Promise((resolve, reject) => {
             const ffmpeg = spawn(this.ffmpegPath, args, {
@@ -248,12 +336,12 @@ export class AudioProcessor {
                 if (code === 0) {
                     resolve();
                 } else {
-                    reject(new Error(`FFmpeg exited with code ${code}: ${stderr}`));
+                    reject(new Error(`FFmpeg saiu com código ${code}: ${stderr}`));
                 }
             });
 
             ffmpeg.on('error', (error) => {
-                reject(new Error(`Failed to start FFmpeg: ${error.message}`));
+                reject(new Error(`Falha ao iniciar FFmpeg: ${error.message}`));
             });
         });
     }
