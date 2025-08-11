@@ -32,7 +32,7 @@ class DiscordBot {
 
     this.apiService = new APIService(process.env.API_BASE_URL!);
     this.recordingService = new RecordingService(this.apiService);
-    this.commandHandler = new CommandHandler(this.recordingService, this.apiService);
+    this.commandHandler = new CommandHandler(this.recordingService, this.apiService, this.client);
 
     this.client.commands = new Collection();
     this.client.recordingService = this.recordingService;
