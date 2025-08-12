@@ -1,6 +1,6 @@
 services:
   discord-bot:
-    image: discord-bot
+    image: crysisprophet1234/bnt-recorder-discordbot:latest
     container_name: bnt-discord-bot
     restart: unless-stopped
     environment:
@@ -15,6 +15,11 @@ services:
       - ./discord_bot/logs:/app/logs
     networks:
       - bnt-network
+    labels:
+      # Habilita monitoramento pelo Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+      # Timeout maior para parar o bot graciosamente
+      - "com.centurylinklabs.watchtower.stop-timeout=60s"
     healthcheck:
       test: ["CMD", "node", "-e", "console.log('Bot is running')"]
       interval: 30s
@@ -23,7 +28,7 @@ services:
       start_period: 5s
 
   web-app:
-    image: web-app
+    image: crysisprophet1234/bnt-recorder-webapp:latest
     container_name: bnt-web-app
     restart: unless-stopped
     ports:
@@ -41,6 +46,11 @@ services:
       - ./web_app/logs:/app/logs
     networks:
       - bnt-network
+    labels:
+      # Habilita monitoramento pelo Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+      # Timeout padrão para web app
+      - "com.centurylinklabs.watchtower.stop-timeout=30s"
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health", "||", "exit", "1"]
       interval: 30s
@@ -49,6 +59,47 @@ services:
       start_period: 10s
     depends_on:
       - discord-bot
+
+  # Watchtower para atualizações automáticas
+  watchtower:
+    image: containrrr/watchtower
+    container_name: bnt-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - bnt-network
+    environment:
+      - TZ=America/Sao_Paulo
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_POLL_INTERVAL=300
+      - WATCHTOWER_ROLLING_RESTART=true
+      - WATCHTOWER_INCLUDE_STOPPED=false
+      - WATCHTOWER_DEBUG=false
+    command:
+      - --cleanup
+      - --label-enable
+      - --interval=300
+      - --rolling-restart
+      - --include-stopped=false
+
+  # Watchtower manual para forçar updates quando necessário
+  watchtower-manual:
+    image: containrrr/watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TZ=America/Sao_Paulo
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_DEBUG=true
+    command:
+      - --run-once
+      - --cleanup
+      - --label-enable
+      - --debug
+    profiles: ["manual"]
 
 networks:
   bnt-network:
