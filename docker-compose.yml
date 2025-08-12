@@ -1,0 +1,55 @@
+services:
+  discord-bot:
+    image: discord-bot
+    container_name: bnt-discord-bot
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - TZ=America/Sao_Paulo
+    env_file:
+      - ./discord_bot/.env
+    volumes:
+      # Persistir gravações e logs
+      - ./discord_bot/recordings:/app/recordings
+      - ./discord_bot/output:/app/output
+      - ./discord_bot/logs:/app/logs
+    networks:
+      - bnt-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "console.log('Bot is running')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  web-app:
+    image: web-app
+    container_name: bnt-web-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - TZ=America/Sao_Paulo
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+    env_file:
+      - ./web_app/.env
+    volumes:
+      # Persistir uploads e logs
+      - ./web_app/uploads:/app/uploads
+      - ./web_app/logs:/app/logs
+    networks:
+      - bnt-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      - discord-bot
+
+networks:
+  bnt-network:
+    driver: bridge
