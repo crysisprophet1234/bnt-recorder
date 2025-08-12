@@ -1,0 +1,32 @@
+# Ignorar node_modules e pacotes
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Ignorar arquivos de configuração local
+.env
+.env.*
+
+# Ignorar pastas de controle de versão
+.git
+.gitignore
+
+# Ignorar arquivos temporários do sistema
+*.swp
+*.swo
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# Ignorar arquivos de testes (opcional)
+tests
+__tests__
+
+# Build artifacts
+dist
+build
+
+logs
+output
+recordings

@@ -1,55 +1,53 @@
-FROM node:18-alpine
+# ---------- Stage 1: build (com dependências de dev)
+FROM node:18-alpine AS builder
 
-# Instalar dependências do sistema necessárias para o Discord bot
-RUN apk add --no-cache \
-    ffmpeg \
-    python3 \
-    make \
-    g++ \
-    libc6-compat
+# Só o que precisa pra compilar módulos nativos
+RUN apk add --no-cache --virtual .build-deps \
+    python3 make g++ \
+  && apk add --no-cache libc6-compat
 
 WORKDIR /app
 
-# Copiar arquivos de dependências primeiro para melhor cache do Docker
-COPY package.json yarn.lock ./
+# Copia manifestos primeiro pra aproveitar cache
+COPY package.json yarn.lock* ./
+RUN yarn install --frozen-lockfile
 
-# Instalar dependências usando yarn (conforme especificado no packageManager)
-RUN yarn install --frozen-lockfile --production=false
-
-# Copiar código fonte e arquivos de configuração
-COPY src/ ./src/
-COPY tsconfig.json ./
-
-# Build da aplicação TypeScript
+# Copia o resto e builda
+COPY . .
 RUN yarn build
 
-# Remover dependências de desenvolvimento para reduzir tamanho da imagem
-RUN yarn install --frozen-lockfile --production=true && yarn cache clean
+# ---------- Stage 2: deps de produção (sem dev)
+FROM node:18-alpine AS prod-deps
+WORKDIR /app
+COPY package.json yarn.lock* ./
+RUN yarn install --frozen-lockfile --production=true \
+  && yarn cache clean
 
-# Criar diretórios necessários para o bot
-RUN mkdir -p /app/recordings /app/output /app/logs
+# ---------- Stage 3: runtime (mínimo necessário pra rodar)
+FROM node:18-alpine AS runtime
 
-# Criar usuário não-root para segurança
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S discordbot -u 1001 -G nodejs
+# Só o que o bot precisa em runtime
+RUN apk add --no-cache ffmpeg tzdata \
+  && addgroup -g 1001 -S nodejs \
+  && adduser -S discordbot -u 1001 -G nodejs
 
-# Definir permissões corretas
-RUN chown -R discordbot:nodejs /app && \
-    chmod -R 755 /app
+WORKDIR /app
 
-# Mudar para usuário não-root
-USER discordbot
-
-# Definir variáveis de ambiente
 ENV NODE_ENV=production
 ENV TZ=America/Sao_Paulo
 
-# Healthcheck para verificar se o bot está funcionando
+# Leva só artefatos e deps de produção
+COPY --from=prod-deps /app/node_modules ./node_modules
+COPY --from=builder  /app/dist         ./dist
+COPY --from=builder  /app/package.json ./package.json
+
+USER discordbot
+
+# Opcional: porta "simbólica" se você expõe HTTP
+# EXPOSE 3000
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD node -e "console.log('Bot is running')" || exit 1
+  CMD node -e "console.log('Bot is running')" || exit 1
 
-# O bot não expõe porta HTTP, mas mantemos para compatibilidade
-EXPOSE 3000
-
-# Comando para iniciar o bot
-CMD ["yarn", "start"]
+# Se seu start roda node dist/index.js, prefira chamar direto
+CMD ["node", "dist/index.js"]
